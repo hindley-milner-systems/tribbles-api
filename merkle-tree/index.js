@@ -7,13 +7,7 @@ const compose =
     fns.reduceRight((acc, val) => val(acc), initialValue);
 
 const makeHash = hashFn => value => hashFn(value);
-const convertToHex = bytes => bytesToHex(bytes);
 
-// //
-// const trace = label => value => {
-//   console.log(label, '::::', value);
-//   return value;
-// };
 const createSha256HexHash = compose(
   // trace('after convertToHex'),
   bytesToHex,
@@ -329,10 +323,17 @@ const makeMerkleTreeAPI = (pubkeys, accounts) => ({
   },
 });
 
+const getPubkey = ({ pubkey }) => ({ pubkey: { key: pubkey.key } });
+const getAddress = ({ address }) => ({ address });
+const withPubkeyAndAddress = o => ({ ...getPubkey(o), ...getAddress(o) });
+
 export {
   getMerkleRootFromMerkleProof,
   generateMerkleProof,
   generateMerkleTree,
   generateMerkleRoot,
+  getAddress,
+  getPubkey,
   makeMerkleTreeAPI,
+  withPubkeyAndAddress,
 };
