@@ -1,9 +1,5 @@
-/**
- * @description this file mirrors the data in ./data/accounts.js
- * In order to run ./test_request.sh, the test data must be exported using
- * commonjs modules, whereas our API uses ES modules.
- */
-module.exports = [
+import { makeMerkleTreeAPI } from '../merkle-tree/index.js';
+const TEST_ACCOUNTS = [
   {
     name: 'wallet-1731277116-1',
     type: 'local',
@@ -11005,3 +11001,10 @@ module.exports = [
       'provide horror danger mountain rate face swarm assume merge ugly frown grow capital sign magic lawsuit genre grocery diet current hotel insane stone cluster',
   },
 ];
+
+const tree = makeMerkleTreeAPI(
+  TEST_ACCOUNTS.map(x => x.pubkey.key),
+  TEST_ACCOUNTS,
+); //?
+export { tree };
+export default TEST_ACCOUNTS;

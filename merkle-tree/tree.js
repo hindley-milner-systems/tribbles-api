@@ -1,5 +1,4 @@
-import accounts from '../data/accounts.js';
-// import { getGistData, gistUrl } from './merkle-tree/fetchAccounts.js';
+import accounts from '../data/1k-keys.js';
 import { makeMerkleTreeAPI } from './index.js';
 
 const trace = label => value => {
@@ -7,16 +6,8 @@ const trace = label => value => {
   return value;
 };
 
-const getPubkey = ({ pubkey }) => ({ pubkey: { key: pubkey.key } });
-const getAddress = ({ address }) => ({ address });
-
-const withPubkeyAndAddress = o => ({ ...getPubkey(o), ...getAddress(o) });
 const defaultPubkeys = accounts.map(x => x.pubkey.key);
-const merkleTreeObj = makeMerkleTreeAPI(
-  defaultPubkeys,
-  accounts.map(withPubkeyAndAddress),
-);
 
-export default merkleTreeObj;
+export default makeMerkleTreeAPI(defaultPubkeys, accounts);
 
-export { defaultPubkeys as pubkeys, merkleTreeObj, makeMerkleTreeAPI };
+export { defaultPubkeys as pubkeys, makeMerkleTreeAPI };
