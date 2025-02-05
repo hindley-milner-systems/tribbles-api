@@ -40,6 +40,7 @@ const createServer = ({ redis, logger, queue }) => {
       await queue.enqueue(
         async () => new Promise(resolve => resolve(next())),
         req.requestId,
+        req.ip
       );
     } catch (error) {
       if (error.message === 'Request timeout') {
@@ -50,6 +51,11 @@ const createServer = ({ redis, logger, queue }) => {
       } else if (error.message === 'Queue capacity exceeded') {
         res.status(503).json({
           error: 'Service unavailable',
+          requestId: req.requestId,
+        });
+      } else if (error.message === 'IP rate limit exceeded') {
+        res.status(429).json({
+          error: 'Too many requests from this IP, please try again later.',
           requestId: req.requestId,
         });
       } else {

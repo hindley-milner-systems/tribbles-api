@@ -1,11 +1,13 @@
 import { pipe } from './utils.js';
 
 const DEFAULT_CONFIG = {
-  requestLimit: process.env.REQUEST_LIMIT || 5,
+  requestLimit: process.env.REQUEST_LIMIT || 50,
   timeWindow: process.env.TIME_WINDOW || 15000,
   queueTimeout: process.env.QUEUE_TIMEOUT || 30000,
   maxQueueSize: process.env.MAX_QUEUE_SIZE || 1000,
-  processingDelay: process.env.PROCESSING_DELAY || 100,
+  processingDelay: process.env.PROCESSING_DELAY || 50,
+  ipLimit: process.env.IP_LIMIT || 30,
+  ipWindowMs: process.env.IP_WINDOW_MS || 60000,
 };
 
 const withMetrics = () => o =>
@@ -14,6 +16,7 @@ const withMetrics = () => o =>
       totalProcessed: 0,
       totalErrors: 0,
       totalTimeouts: 0,
+      totalRateLimited: 0,
     },
     getMetrics() {
       return {
@@ -32,6 +35,14 @@ const withMetrics = () => o =>
 const withProcessing = redis => o =>
   Object.assign({}, o, {
     processing: false,
+    async checkIpLimit(ip) {
+      const key = `ip:${ip}`;
+      const count = await redis.incr(key);
+      if (count === 1) {
+        await redis.pexpire(key, this.config.ipWindowMs);
+      }
+      return count <= this.config.ipLimit;
+    },
     async processQueue() {
       if (this.processing || this.queue.length === 0) return;
       this.processing = true;
@@ -55,6 +66,14 @@ const withProcessing = redis => o =>
           }
 
           const request = this.queue.shift();
+
+          // Check IP limit before processing
+          if (!(await this.checkIpLimit(request.ip))) {
+            request.reject(new Error('IP rate limit exceeded'));
+            this.incrementMetric('totalRateLimited');
+            continue;
+          }
+
           try {
             const result = await request.handler();
             request.resolve(result);
@@ -77,7 +96,7 @@ const withProcessing = redis => o =>
 const withEnqueuing = () => o =>
   Object.assign({}, o, {
     queue: [],
-    async enqueue(requestHandler, requestId) {
+    async enqueue(requestHandler, requestId, ip) {
       if (this.queue.length >= this.config.maxQueueSize) {
         throw new Error('Queue capacity exceeded');
       }
@@ -97,6 +116,7 @@ const withEnqueuing = () => o =>
           },
           reject,
           requestId,
+          ip,
           timestamp: Date.now(),
         });
 
