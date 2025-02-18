@@ -1,4 +1,4 @@
-import accounts from '../data/1k-keys.js';
+import accounts from '../data/feb-keys2.js';
 import { makeMerkleTreeAPI } from './index.js';
 
 const trace = label => value => {
@@ -8,6 +8,8 @@ const trace = label => value => {
 
 const defaultPubkeys = accounts.map(x => x.pubkey.key);
 
-export default makeMerkleTreeAPI(defaultPubkeys, accounts);
+const tree = makeMerkleTreeAPI(defaultPubkeys, accounts);
 
 export { defaultPubkeys as pubkeys, makeMerkleTreeAPI };
+
+export default tree;
