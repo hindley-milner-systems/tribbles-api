@@ -82,6 +82,17 @@ const createServer = ({ redis, logger, queue }) => {
     res.json({
       ...queue.getMetrics(),
       timestamp: new Date().toISOString(),
+      config: queue.config,
+    });
+  });
+  
+  app.get('/api/queue-health', (req, res) => {
+    const metrics = queue.getMetrics();
+    const isHealthy = metrics.totalErrors < 100 && metrics.totalTimeouts < 50;
+    res.status(isHealthy ? 200 : 503).json({
+      healthy: isHealthy,
+      metrics,
+      timestamp: new Date().toISOString(),
     });
   });
 
