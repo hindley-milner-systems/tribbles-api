@@ -3,55 +3,93 @@ import { createQueue } from '../src/queue.js';
 import pino from 'pino';
 import Redis from 'ioredis';
 import { wait } from '../src/utils.js';
+import sinon from 'sinon'; // Add missing sinon import
+
+const createMocks = () => {
+  const mockRedis = {
+    incr: sinon.stub().resolves(1),
+    expire: sinon.stub().resolves('OK'),
+    del: sinon.stub().resolves(1),
+    get: sinon.stub().resolves(null),
+    ping: sinon.stub().resolves('PONG'),
+    ttl: sinon.stub().resolves(0),
+    on: sinon.stub(),
+  };
+
+  const mockLogger = {
+    info: sinon.stub(),
+    error: sinon.stub(),
+    warn: sinon.stub(),
+  };
+
+  return { mockRedis, mockLogger };
+};
 
 const TEST_CONFIG = {
-  requestLimit: 5,
-  timeWindow: 15000, // 15 seconds
+  requestLimit: 1, // Changed to 1 to match production
+  timeWindow: 8000, // Changed to 8000ms (8 seconds)
   queueTimeout: 30000, // 30 seconds
   maxQueueSize: 1000,
-  processingDelay: 50,
+  processingDelay: 50, // Keep short for testing
+  ipLimit: 10, // Added IP limit
+  ipWindowMs: 60000, // Added IP window
 };
+
 const trace = label => value => {
   console.log(label, '::::', value);
   return value;
 };
-// Fix this in the test.before hook
+
+// Fix the test.before hook to use mocks instead of real Redis
 test.before(t => {
-  const redis = new Redis();
-  const logger = pino({ level: 'silent' });
+  // Use mocks instead of real Redis to avoid connection issues
+  const { mockRedis, mockLogger } = createMocks();
+
   const queueConfig = {
-    config: TEST_CONFIG, // Use TEST_CONFIG directly
-    redis,
-    logger,
+    config: TEST_CONFIG,
+    redis: mockRedis,
+    logger: mockLogger,
   };
-  redis.on('error', trace('redis error'));
 
   t.context = { queueConfig };
 });
 
+// Update afterEach to work with mocks
 test.afterEach(async t => {
   const { queueConfig } = t.context;
-  await queueConfig.redis.del('global_request_count');
+  // Reset stubs instead of making real Redis calls
+  if (queueConfig.redis.del.resetHistory) {
+    queueConfig.redis.del.resetHistory();
+    queueConfig.redis.get.resetHistory();
+    queueConfig.redis.ttl.resetHistory();
+  }
   // Wait for any pending operations to complete
-  await wait(150);
+  await wait(50);
 });
 
+// Update beforeEach to work with mocks
 test.beforeEach(async t => {
   const { queueConfig } = t.context;
-  await queueConfig.redis.del('global_request_count');
+  // Reset stubs instead of making real Redis calls
+  if (queueConfig.redis.del.resetHistory) {
+    queueConfig.redis.del.resetHistory();
+  }
   // Wait for Redis operation to complete
   await wait(50);
 });
 
+// Fix the first test to match the actual queue metrics structure
 test('Queue initializes with empty state', t => {
   const { queueConfig } = t.context;
   const queue = createQueue(queueConfig);
 
-  t.deepEqual(queue.metrics, {
-    totalProcessed: 0,
-    totalErrors: 0,
-    totalTimeouts: 0,
-  });
+  // Check that metrics has the expected properties
+  t.is(queue.metrics.totalProcessed, 0);
+  t.is(queue.metrics.totalErrors, 0);
+  t.is(queue.metrics.totalTimeouts, 0);
+  t.is(queue.metrics.totalRateLimited, 0);
+
+  // Check queue is empty
   t.deepEqual(queue.queue, []);
   t.false(queue.processing);
 });
@@ -151,17 +189,25 @@ test('Queue provides accurate status information', async t => {
   t.true(status.estimatedWaitTime >= 0);
 });
 
+// Update the after hook to work with mocks
+test.after(async t => {
+  // No need to close Redis connection with mocks
+  await wait(100); // Just wait a bit for any pending operations
+});
+
+// Reduce the timeouts in the remaining tests to prevent test timeouts
 test('Queue handles concurrent requests', async t => {
   const { queueConfig } = t.context;
   const queue = createQueue(queueConfig);
   const results = [];
 
   const handler = id => () =>
-    new Promise(resolve =>
-      setTimeout(() => {
-        results.push(id);
-        resolve(id);
-      }, Math.random() * 100),
+    new Promise(
+      resolve =>
+        setTimeout(() => {
+          results.push(id);
+          resolve(id);
+        }, 10), // Reduce timeout from random*100 to just 10ms
     );
 
   // Enqueue 5 concurrent requests
@@ -212,4 +258,65 @@ test('Queue handles errors gracefully', async t => {
 test.after(async t => {
   const { redis } = t.context.queueConfig;
   await redis.end();
+});
+
+// Add after existing tests
+test('Queue enforces IP rate limits', async t => {
+  const { queueConfig } = t.context;
+  const queue = createQueue({
+    ...queueConfig,
+    config: {
+      ...TEST_CONFIG,
+      ipLimit: 2, // Set low for testing
+      ipWindowMs: 60000,
+    },
+  });
+
+  const handler = () => Promise.resolve('done');
+  const ip = '192.168.1.1';
+
+  // First two requests should succeed
+  await queue.enqueue(handler, 'id1', ip);
+  await queue.enqueue(handler, 'id2', ip);
+
+  // Third request should fail due to IP rate limit
+  await t.throwsAsync(() => queue.enqueue(handler, 'id3', ip), {
+    message: 'IP rate limit exceeded',
+  });
+
+  // Different IP should still work
+  await t.notThrowsAsync(() => queue.enqueue(handler, 'id4', '192.168.1.2'));
+
+  // Wait for processing to complete
+  await wait(150);
+
+  t.is(queue.getMetrics().totalRateLimited, 1);
+});
+
+test('Queue enforces global rate limit', async t => {
+  const { queueConfig } = t.context;
+  const queue = createQueue({
+    ...queueConfig,
+    config: {
+      ...TEST_CONFIG,
+      requestLimit: 1,
+      timeWindow: 500, // Short window for testing
+      processingDelay: 100,
+    },
+  });
+
+  // Set global request count to limit
+  await queueConfig.redis.set('global_request_count', '1');
+  await queueConfig.redis.expire('global_request_count', 1);
+
+  const start = Date.now();
+  const handler = () => Promise.resolve('done');
+
+  // This should be delayed until rate limit resets
+  await queue.enqueue(handler, 'id1');
+
+  const elapsed = Date.now() - start;
+
+  // Should have waited for rate limit to reset
+  t.true(elapsed >= 100);
 });

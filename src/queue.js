@@ -1,11 +1,13 @@
 import { pipe } from './utils.js';
 
 const DEFAULT_CONFIG = {
-  requestLimit: process.env.REQUEST_LIMIT || 5,
-  timeWindow: process.env.TIME_WINDOW || 15000,
-  queueTimeout: process.env.QUEUE_TIMEOUT || 30000,
-  maxQueueSize: process.env.MAX_QUEUE_SIZE || 1000,
-  processingDelay: process.env.PROCESSING_DELAY || 100,
+  requestLimit: 1, // 1 transaction
+  timeWindow: 8000, // per 8 seconds
+  queueTimeout: 60000, // Increased to 60s for high traffic
+  maxQueueSize: 1000, // Maximum queue size
+  processingDelay: 8000, // Enforce 8s delay between transactions
+  ipLimit: 10, // 10 requests per minute per IP
+  ipWindowMs: 60000, // 1 minute window
 };
 
 const withMetrics = () => o =>
@@ -32,14 +34,22 @@ const withMetrics = () => o =>
 const withProcessing = redis => o =>
   Object.assign({}, o, {
     processing: false,
+    async checkIpLimit(ip) {
+      const key = `ip:${ip}`;
+      const count = await redis.incr(key);
+      if (count === 1) {
+        await redis.pexpire(key, this.config.ipWindowMs);
+      }
+      return count <= this.config.ipLimit;
+    },
     async processQueue() {
       if (this.processing || this.queue.length === 0) return;
       this.processing = true;
 
       try {
         while (this.queue.length > 0) {
+          // Enforce global rate limit
           const currentCount = await redis.incr('global_request_count');
-
           if (currentCount === 1) {
             await redis.expire(
               'global_request_count',
@@ -48,6 +58,7 @@ const withProcessing = redis => o =>
           }
 
           if (currentCount > this.config.requestLimit) {
+            // Wait full 8 seconds before checking again
             await new Promise(resolve =>
               setTimeout(resolve, this.config.processingDelay),
             );
@@ -55,6 +66,16 @@ const withProcessing = redis => o =>
           }
 
           const request = this.queue.shift();
+
+          // Check IP limit before processing
+          if (request.ip && !(await this.checkIpLimit(request.ip))) {
+            request.reject(new Error('IP rate limit exceeded'));
+            this.incrementMetric('totalRateLimited');
+            continue;
+          }
+
+          const startTime = Date.now();
+
           try {
             const result = await request.handler();
             request.resolve(result);
@@ -64,9 +85,15 @@ const withProcessing = redis => o =>
             this.incrementMetric('totalErrors');
           }
 
-          await new Promise(resolve =>
-            setTimeout(resolve, this.config.processingDelay),
+          // Calculate remaining time to ensure full 8-second spacing
+          const processingTime = Date.now() - startTime;
+          const remainingDelay = Math.max(
+            0,
+            this.config.processingDelay - processingTime,
           );
+
+          // Always wait the remaining time to ensure 8s between transactions
+          await new Promise(resolve => setTimeout(resolve, remainingDelay));
         }
       } finally {
         this.processing = false;
