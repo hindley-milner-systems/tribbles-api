@@ -16,6 +16,7 @@ const withMetrics = () => o =>
       totalProcessed: 0,
       totalErrors: 0,
       totalTimeouts: 0,
+      totalRateLimited: 0,
     },
     getMetrics() {
       return {
@@ -104,7 +105,7 @@ const withProcessing = redis => o =>
 const withEnqueuing = () => o =>
   Object.assign({}, o, {
     queue: [],
-    async enqueue(requestHandler, requestId) {
+    async enqueue(requestHandler, requestId, ip) {
       if (this.queue.length >= this.config.maxQueueSize) {
         throw new Error('Queue capacity exceeded');
       }
@@ -124,6 +125,7 @@ const withEnqueuing = () => o =>
           },
           reject,
           requestId,
+          ip,
           timestamp: Date.now(),
         });
 
@@ -144,6 +146,7 @@ const withReset = () => o =>
         totalProcessed: 0,
         totalErrors: 0,
         totalTimeouts: 0,
+        totalRateLimited: 0,
       };
     },
   });
