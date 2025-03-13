@@ -7,11 +7,15 @@ const createMocks = () => {
   const mockRedis = {
     incr: sinon.stub().resolves(1),
     expire: sinon.stub().resolves('OK'),
+    pexpire: sinon.stub().resolves('OK'),
     del: sinon.stub().resolves(1),
     get: sinon.stub().resolves(null),
+    set: sinon.stub().resolves('OK'),
     ping: sinon.stub().resolves('PONG'),
     ttl: sinon.stub().resolves(0),
     on: sinon.stub(),
+    end: sinon.stub().resolves(),
+    quit: sinon.stub().resolves(),
   };
 
   const mockLogger = {
@@ -46,6 +50,7 @@ test('Queue initializes with empty state', t => {
     totalProcessed: 0,
     totalErrors: 0,
     totalTimeouts: 0,
+    totalRateLimited: 0,
   });
   t.deepEqual(queue.queue, []);
   t.false(queue.processing);
@@ -84,8 +89,9 @@ test('Queue respects rate limits', async t => {
   // Arrange
   const { mockRedis, mockLogger } = createMocks();
 
-  // Configure Redis mock to simulate rate limit
-  mockRedis.get.resolves('5'); // Current count is at limit
+  // Configure Redis mock to simulate rate limit - first return over limit, then below limit
+  mockRedis.incr.onFirstCall().resolves(6); // Over the limit
+  mockRedis.incr.onSecondCall().resolves(1); // Reset to 1 on next check
 
   const testConfig = {
     requestLimit: 5, // Max 5 requests
@@ -110,7 +116,7 @@ test('Queue respects rate limits', async t => {
   await queue.enqueue(handler, 'test-id');
   const endTime = Date.now();
 
-  // Should have waited for rate limit
+  // Should have waited for rate limit (at least processingDelay)
   t.true(endTime - startTime >= 50);
   t.true(handler.calledOnce);
 });
@@ -132,7 +138,7 @@ test('Queue handles errors in handlers', async t => {
     logger: mockLogger,
   });
 
-  // Mock the handler function to throw an error
+  // Mock the handler functionq to throw an error
   const handler = sinon.stub().rejects(new Error('Test error'));
 
   // Act & Assert
