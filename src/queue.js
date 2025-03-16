@@ -8,6 +8,8 @@ const DEFAULT_CONFIG = {
   processingDelay: 8000, // Enforce 8s delay between transactions
   ipLimit: 10, // 10 requests per minute per IP
   ipWindowMs: 60000, // 1 minute window
+  errorThreshold: 50, // Number of errors before queue reset
+  errorNotificationInterval: 10, // Notify every X errors
 };
 
 const withMetrics = () => o =>
@@ -35,6 +37,7 @@ const withMetrics = () => o =>
 const withProcessing = redis => o =>
   Object.assign({}, o, {
     processing: false,
+    processingPromise: null,
     async checkIpLimit(ip) {
       const key = `ip:${ip}`;
       const count = await redis.incr(key);
@@ -123,16 +126,42 @@ const withEnqueuing = () => o =>
             clearTimeout(timeoutId);
             resolve(result);
           },
-          reject,
+          reject: error => {
+            clearTimeout(timeoutId);
+            reject(error);
+          },
           requestId,
           ip,
           timestamp: Date.now(),
         });
 
-        this.processQueue().catch(err => {
-          console.error('Queue processing error:', err);
-          this.incrementMetric('totalErrors');
-        });
+        // Use a promise-based mutex pattern to prevent parallel processing
+        if (!this.processingPromise || this.processingPromise.isResolved) {
+          this.processingPromise = this.processQueue()
+            .catch(err => {
+              // Log the error
+              this.logError(err);
+              this.incrementMetric('totalErrors');
+
+              // Implement recovery mechanism
+              if (this.metrics.totalErrors > this.config.errorThreshold) {
+                this.reset(); // Reset queue state if too many errors
+                this.logError(new Error('Queue reset due to excessive errors'));
+              }
+
+              // Notify monitoring systems
+              if (
+                this.metrics.totalErrors %
+                  this.config.errorNotificationInterval ===
+                0
+              ) {
+                this.notifyErrorThreshold();
+              }
+            })
+            .finally(() => {
+              this.processingPromise.isResolved = true;
+            });
+        }
       });
     },
   });
@@ -158,6 +187,18 @@ const withLogging = logger => o =>
     },
     logMetrics() {
       logger.info('Queue metrics:', this.getMetrics());
+    },
+    notifyErrorThreshold() {
+      // Log a critical error for monitoring systems to pick up
+      logger.error({
+        level: 'CRITICAL',
+        message: 'Queue error threshold exceeded',
+        metrics: this.getMetrics(),
+        timestamp: new Date().toISOString(),
+      });
+
+      // In a real production environment, this would integrate with monitoring
+      // systems like Datadog, New Relic, or send alerts via Slack/PagerDuty
     },
   });
 

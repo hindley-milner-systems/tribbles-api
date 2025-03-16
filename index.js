@@ -7,19 +7,12 @@ import pino from 'pino';
 import helmet from 'helmet';
 import { createQueue, DEFAULT_CONFIG } from './src/queue.js';
 import crypto from 'crypto'; // Add explicit import for crypto
-
-const compose =
-  (...fns) =>
-  initialValue =>
-    fns.reduceRight((acc, val) => val(acc), initialValue);
-
-const getHash = ({ hash }) => hash;
-const isUndefined = x => x === undefined;
-const trace = label => value => {
-  console.log(`${label}: ${value}`);
-  return value;
-};
-const isUndefinedCheck = compose(isUndefined, trace('after getHash'), getHash);
+import {
+  updateRedisStatus,
+  getRedisStatus,
+  respondToRequest,
+  validateRequest,
+} from './src/db.js';
 
 // Fix the duplicate requestId middleware and properly handle merkleTreeAPI
 
@@ -31,9 +24,6 @@ const createServer = ({
   generateRequestId,
 }) => {
   const app = express();
-  
-  // Use the provided merkleTreeAPI or the default import
-  const treeAPI = customMerkleTreeAPI || merkleTreeAPI;
 
   // Middleware
   app.use(helmet());
@@ -71,13 +61,16 @@ const createServer = ({
 
   // IMPORTANT: Remove this commented out middleware completely
   // It's causing confusion in the code review
-  
-  // Eligibility request handler
-  const handleSuccessfulRequest = (proof, res) =>
-    res.json({ message: 'User is eligible for airdrop.', payload: proof });
 
-  // Rate limiter middleware
+  // Rate limiter middleware with Redis connection check
   const rateLimiter = async (req, res, next) => {
+    // Check Redis connection status first
+    if (!getRedisStatus().isConnected) {
+      logger.warn('Rate limiting bypassed due to Redis disconnection');
+      // Allow the request to proceed without rate limiting when Redis is down
+      return next();
+    }
+
     try {
       await queue.enqueue(
         async () => new Promise(resolve => resolve(next())),
@@ -100,6 +93,13 @@ const createServer = ({
           error: 'Too many requests from this IP, please try again later.',
           requestId: req.requestId,
         });
+      } else if (error.message && error.message.includes('Redis')) {
+        // Redis-specific errors should update the connection status
+        logger.error('Redis error in rate limiter:', error);
+        updateRedisStatus({ isConnected: false, lastError: error });
+
+        // Allow the request to proceed without rate limiting
+        next();
       } else {
         logger.error('Rate limiter error:', error);
         res.status(500).json({
@@ -110,20 +110,8 @@ const createServer = ({
     }
   };
 
-  // Routes
-  app.post('/api/verify-eligibility', rateLimiter, (req, res) => {
-    const {
-      publicKey: { key },
-    } = req.body;
-    const proof = treeAPI.constructProof(key);
-
-    const [_fst, snd] = proof;
-    return isUndefinedCheck(snd)
-      ? res.status(400).json({
-          message: 'User is ineligible for the tribbles airdrop.',
-          requestId: req.requestId,
-        })
-      : handleSuccessfulRequest(proof, res);
+  app.post('/api/verify-eligibility', rateLimiter, (req, res, next) => {
+    compose(respondToRequest(res, next), validateRequest)(req);
   });
 
   app.get('/api/queue-status', (req, res) => {
@@ -134,13 +122,34 @@ const createServer = ({
   });
 
   app.get('/health', async (req, res) => {
+    const redisStatus = getRedisStatus();
+    const queueMetrics = queue.getMetrics();
+    const queueHealth =
+      queueMetrics.currentQueueLength < queueMetrics.maxQueueSize * 0.8
+        ? 'healthy'
+        : 'degraded';
+
+    // If Redis is already known to be disconnected, don't try to ping
+    if (!redisStatus.isConnected) {
+      logger.warn('Health check with Redis already known to be disconnected');
+      return res.status(503).json({
+        status: 'degraded',
+        redis: 'disconnected',
+        redisLastError: redisStatus.lastError
+          ? redisStatus.lastError.message
+          : null,
+        redisLastReconnectAttempt: redisStatus.lastReconnectAttempt,
+        queue: {
+          ...queueMetrics,
+          health: 'unknown', // Queue health depends on Redis
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Otherwise, try to ping Redis to confirm it's still connected
     try {
       await redis.ping();
-      const queueMetrics = queue.getMetrics();
-      const queueHealth =
-        queueMetrics.currentQueueLength < queueMetrics.maxQueueSize * 0.8
-          ? 'healthy'
-          : 'degraded';
 
       res.json({
         status: 'healthy',
@@ -153,6 +162,21 @@ const createServer = ({
       });
     } catch (error) {
       logger.error('Health check failed:', error);
+
+      // Update Redis status since ping failed
+      updateRedisStatus({
+        isConnected: false,
+        lastError: error,
+        lastReconnectAttempt: Date.now(),
+      });
+
+      // Try to reconnect
+      setTimeout(() => {
+        redis.connect().catch(err => {
+          logger.error('Redis reconnection failed during health check:', err);
+        });
+      }, 1000);
+
       res.status(503).json({
         status: 'unhealthy',
         redis: 'disconnected',
@@ -171,8 +195,21 @@ const createServer = ({
     });
   });
 
-  // Add transaction rate monitoring endpoint
+  // Add transaction rate monitoring endpoint with Redis status check
   app.get('/api/transaction-rate', async (req, res) => {
+    // Check Redis connection status first
+    if (!getRedisStatus().isConnected) {
+      logger.warn(
+        'Transaction rate check attempted while Redis is disconnected',
+      );
+      return res.status(503).json({
+        error: 'Redis service unavailable',
+        requestId: req.requestId,
+        redisStatus: 'disconnected',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     try {
       const count = (await redis.get('global_request_count')) || 0;
       const ttl = await redis.ttl('global_request_count');
@@ -186,9 +223,19 @@ const createServer = ({
       });
     } catch (error) {
       logger.error('Transaction rate check failed:', error);
+
+      // Update Redis status if this was a connection error
+      if (
+        error.message.includes('connection') ||
+        error.code === 'ECONNREFUSED'
+      ) {
+        updateRedisStatus({ isConnected: false, lastError: error });
+      }
+
       res.status(500).json({
         error: 'Failed to retrieve transaction rate',
         requestId: req.requestId,
+        details: error.message,
       });
     }
   });
@@ -205,13 +252,38 @@ const initializeServer = async () => {
     timestamp: () => `,"time":"${new Date().toISOString()}"`,
   });
 
-  // Redis client setup
+  // Redis client setup with health tracking
   const redis = new Redis(REDIS_URL, {
     retryStrategy: times => Math.min(times * 50, 2000),
   });
 
-  redis.on('error', err => logger.error('Redis Client Error', err));
+  // Initialize Redis status
+  updateRedisStatus({ isConnected: false });
 
+  // Handle successful connection
+  redis.on('connect', () => {
+    logger.info('Redis connected successfully');
+    updateRedisStatus({
+      isConnected: true,
+      lastError: null,
+      lastReconnectAttempt: null,
+    });
+  });
+
+  // Wire up the event handlers
+  redis.on('error', err => {
+    const [state, effect] = handleEvent('error', err);
+    console.log('Redis error:', { err, effect });
+    console.log('Redis state:::', state);
+    runEffect(effect);
+  });
+
+  redis.on('close', () => {
+    const [state, effect] = handleEvent('close', {});
+    console.log('Redis effect:', { effect });
+    console.log('Redis state:::', state);
+    runEffect(effect);
+  });
   // Create queue instance
   const queue = createQueue({
     config: DEFAULT_CONFIG,
@@ -220,11 +292,11 @@ const initializeServer = async () => {
   });
 
   // Create server
-  const app = createServer({ 
-    redis, 
-    logger, 
+  const app = createServer({
+    redis,
+    logger,
     queue,
-    merkleTreeAPI  // Pass the merkleTreeAPI explicitly
+    merkleTreeAPI, // Pass the merkleTreeAPI explicitly
   });
 
   // Graceful shutdown handler
