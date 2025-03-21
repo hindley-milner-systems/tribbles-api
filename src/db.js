@@ -1,4 +1,5 @@
-import { union, getProp, compose } from './utils.js';
+import { Either } from './shared/monads.js';
+import { union, getProp, compose, isValidRequest } from './utils.js';
 
 const ConnectionState = union('ConnectionState', [
   'Connected',
@@ -70,8 +71,8 @@ const Proof = union('Proof', ['Eligible', 'Ineligible']);
 // Validation function returning a Request type
 const validateRequest = req =>
   isValidRequest(req)
-    ? Request.Valid({ key: req.body.publicKey.key, requestId: req.requestId })
-    : Request.Invalid({
+    ? Either.Right({ key: req.body.publicKey.key, requestId: req.requestId })
+    : Either.Left({
         error: 'Invalid request format',
         requestId: req.requestId,
       });
@@ -81,19 +82,48 @@ const generateProof = ({ key, requestId }) => {
   const proof = treeAPI.constructProof(key);
   const [_fst, snd] = proof;
 
+  console.log('------------------------');
+  console.log('snd::', snd);
+
   return isUndefinedCheck(snd)
     ? Proof.Ineligible({ requestId })
     : Proof.Eligible({ proof, requestId });
 };
-
+// const handleGenerateProof = ({key, requestId}) =>
 // Response handlers
-const respondToRequest = res => result =>
-  result.match({
+const respondToRequest = (res, next) => result => {
+  console.log('------------------------');
+  console.log('responseToRequest::'.toUpperCase());
+  console.log('------------------------');
+  console.log('result::', result);
+  return result.match({
     Invalid: ({ error, requestId }) =>
       res.status(400).json({ error, requestId }),
 
-    Valid: data => respondToProof(res)(generateProof(data)),
+    Valid: proofResult =>
+      Promise.resolve(proofResult)
+        .then(result => {
+          console.group('######## INSIDE VALID BLOCK #########');
+          console.log('------------------------');
+          console.log('result::', result);
+          console.log('------------------------');
+          console.log('result.inspect()::', result.inspect());
+          return result.match({
+            Ineligible: ({ requestId }) =>
+              res.status(400).json({
+                message: 'User is ineligible for the tribbles airdrop.',
+                requestId,
+              }),
+
+            Eligible: ({ proof, requestId }) =>
+              handleSuccessfulRequest(proof, res),
+          });
+        })
+        .catch(error => next(error)),
   });
+};
+const handleSuccessfulRequest = (proof, res) =>
+  res.json({ message: 'User is eligible for airdrop.', payload: proof });
 
 const respondToProof = (res, next) => proofResult =>
   Promise.resolve(proofResult)

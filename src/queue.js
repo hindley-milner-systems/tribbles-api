@@ -2,7 +2,7 @@ import { pipe } from './utils.js';
 
 const DEFAULT_CONFIG = {
   requestLimit: 1, // 1 transaction
-  timeWindow: 8000, // per 8 seconds
+  timeWindow: 2000, // per 8 seconds
   queueTimeout: 60000, // Increased to 60s for high traffic
   maxQueueSize: 1000, // Maximum queue size
   processingDelay: 8000, // Enforce 8s delay between transactions

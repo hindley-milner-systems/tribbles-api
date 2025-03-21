@@ -21,7 +21,7 @@ module.exports = [
     address: 'agoric188gu9dkv0ey3h8c79n3xkdjr7aa7p9pw9rrtn5',
     pubkey: {
       type: '/cosmos.crypto.secp256k1.PubKey',
-      key: 'AsMy9sdrQ7ORSha5nYaA5OinnBaXD/nanO+G4op3OX4c',
+      keys: null,
     },
     mnemonic:
       'iron taste nerve parade analyst album feel flush quarter travel capital almost guilt thing symbol fence slab odor very absurd swing cushion erosion myth',

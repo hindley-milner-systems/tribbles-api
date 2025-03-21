@@ -4,7 +4,7 @@ import request from 'supertest';
 import { createServer } from '../index.js';
 import Redis from 'ioredis';
 import pino from 'pino';
-
+import merkleTreeAPI from '../merkle-tree/tree.js';
 // Create isolated test instances for each test to prevent shared state issues
 const createTestContext = () => {
   // Use Redis mock instead of real Redis to avoid connection issues
@@ -12,11 +12,6 @@ const createTestContext = () => {
 
   // Silent logger to reduce noise
   const logger = pino({ level: 'silent' });
-
-  // Mock merkleTreeAPI
-  const merkleTreeAPI = {
-    constructProof: sinon.stub(),
-  };
 
   // Fixed UUID for testing
   const TEST_UUID = '12345678-1234-1234-1234-123456789012';
@@ -71,28 +66,26 @@ test('GET /health returns healthy status when Redis is connected', async t => {
 });
 
 test('POST /api/verify-eligibility returns eligible response for valid key', async t => {
-  const { app, merkleTreeAPI } = createTestContext();
+  const { app, merkleTreeAPI } = await createTestContext();
 
+  const { pubkeys } = merkleTreeAPI;
+  const [a, b, ...c] = pubkeys;
   // Mock proof generation for eligible key
-  merkleTreeAPI.constructProof.returns(['root', { hash: 'valid-hash' }]);
+
+  t.log('KEY:::', key);
 
   const response = await request(app)
     .post('/api/verify-eligibility')
-    .send({ publicKey: { key: 'valid-key' } })
+    .send({ publicKey: { key: a } })
     .expect(200);
 
   t.is(response.body.message, 'User is eligible for airdrop.');
-  t.deepEqual(response.body.payload, ['root', { hash: 'valid-hash' }]);
-  t.true(merkleTreeAPI.constructProof.calledWith('valid-key'));
+  t.deepEqual(response.body.payload, merkleTreeAPI.constructProof(a));
+  t.true(merkleTreeAPI.constructProof.calledWith(a));
 });
 
 test('POST /api/verify-eligibility returns ineligible response for invalid key', async t => {
   const { app, merkleTreeAPI } = createTestContext();
-
-  // Mock proof generation for ineligible key
-  // The server code uses isUndefinedCheck(snd) where snd is expected to have a hash property
-  // We need to return an object where getHash({hash}) would return undefined
-  merkleTreeAPI.constructProof.returns(['root', {}]); // Empty object with no hash property
 
   const response = await request(app)
     .post('/api/verify-eligibility')

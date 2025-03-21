@@ -13,6 +13,12 @@ import {
   respondToRequest,
   validateRequest,
 } from './src/db.js';
+import {
+  isUndefinedCheck,
+  isValidRequest,
+  safeHandleRequest,
+  safeUndefinedCheck,
+} from './src/utils.js';
 
 // Fix the duplicate requestId middleware and properly handle merkleTreeAPI
 
@@ -20,7 +26,7 @@ const createServer = ({
   redis,
   logger,
   queue,
-  merkleTreeAPI: customMerkleTreeAPI,
+  merkleTreeAPI,
   generateRequestId,
 }) => {
   const app = express();
@@ -109,9 +115,33 @@ const createServer = ({
       }
     }
   };
+  const trace = label => value => {
+    console.log(label, '::::', value);
+    return value;
+  };
 
+  const defaultProof = [
+    { hash: 'default hash', direction: 'right' },
+    { hash: undefined, direction: 'left' },
+  ];
+  const tail = ([x, ...xs]) => xs;
+
+  const handleSuccessfulRequest = (proof, res) =>
+    res.json({ message: 'User is eligible for airdrop.', payload: proof });
+  // const safeEligibilityCheck = compose(,tail) ([x, y] = defaultProof) => ;
   app.post('/api/verify-eligibility', rateLimiter, (req, res, next) => {
-    compose(respondToRequest(res, next), validateRequest)(req);
+    const safeFn = safeHandleRequest(req).map(trace('after handling'));
+
+    const either = safeFn.run({ treeAPI: merkleTreeAPI });
+    // .fold(trace('error'), trace('success'));
+    console.log('safeFn::', {
+      either,
+    });
+    return either[1].hash
+      ? handleSuccessfulRequest(either, res)
+      : res(400).json({
+          error: 'User is ineligible',
+        });
   });
 
   app.get('/api/queue-status', (req, res) => {
