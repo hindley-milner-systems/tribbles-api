@@ -126,14 +126,11 @@ const safeStringOr = value =>
 
 const isValidRequest = compose(safeHexString, getKey, getPublicKey, getBody);
 
-const safeHandleRequest = (request, treeAPI) =>
-  isValidRequest(request).chain(hexString => {
-    console.log({ hexString });
-    const res = Fn(x => x.treeAPI.constructProof(hexString));
-    console.log('------------------------');
-    console.log('res', res);
-    return res;
-  });
+const runConstructProof = pubkey =>
+  Fn(({ treeAPI }) => treeAPI.constructProof(pubkey));
+
+const safeHandleRequest = request =>
+  isValidRequest(request).chain(runConstructProof);
 const defaultProof = [
   { hash: 'default hash', direction: 'right' },
   { hash: undefined, direction: 'left' },
